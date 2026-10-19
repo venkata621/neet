@@ -150,11 +150,88 @@ app.post('/api/youtube/metadata', async (req, res) => {
 app.post('/api/youtube/transcript', async (req, res) => {
   try {
     const id = videoId(String(req.body?.url || ''));
-    if (!id) return res.status(400).json({ error: 'Enter a valid YouTube video URL.' });
-    const transcript = await YoutubeTranscript.fetchTranscript(id);
-    if (!transcript?.length) return res.status(404).json({ error: 'No captions were returned for this video.' });
-    return res.json({ videoId: id, transcript, transcriptText: transcript.map(x => x.text).join('\n'), segments: transcript.length, retrievedAt: new Date().toISOString(), note: 'Transcript availability varies. Verify caption accuracy and formulas.' });
-  } catch (e) { return res.status(502).json({ error: 'Transcript retrieval failed. Captions may be disabled, restricted, unavailable or blocked. Paste captions manually if needed. Details: ' + e.message }); }
+
+    if (!id) {
+      return res.status(400).json({
+        error: 'Enter a valid YouTube video URL.'
+      });
+    }
+
+    const apiKey = process.env.YOUTUBE_TRANSCRIPT_API_KEY;
+
+    if (!apiKey) {
+      return res.status(503).json({
+        error: 'Transcript API key is missing from .env.'
+      });
+    }
+
+    const response = await fetch(
+      'https://www.youtubetranscript.dev/api/v2/transcribe',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          video: id,
+          mode: 'captions_only',
+          format: { timestamp: true }
+        }),
+        signal: AbortSignal.timeout(45000)
+      }
+    );
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      console.error('Transcript API error:', response.status, data);
+
+      return res.status(
+        [400, 401, 402, 404, 429].includes(response.status)
+          ? response.status
+          : 502
+      ).json({
+        error: data.message || data.error ||
+          `Transcript provider returned HTTP ${response.status}.`
+      });
+    }
+
+    const result = data.data?.transcript;
+    const text = result?.text ||
+      result?.segments?.map(s => s.text).join(' ') || '';
+
+    if (!text.trim()) {
+      return res.status(404).json({
+        error: 'No captions were returned for this video.'
+      });
+    }
+
+    const transcript = result.segments?.length
+      ? result.segments.map(s => ({
+          text: s.text,
+          offset: s.start ?? 0,
+          duration: s.start != null && s.end != null
+            ? s.end - s.start
+            : 0
+        }))
+      : [{ text, offset: 0, duration: 0 }];
+
+    return res.json({
+      videoId: id,
+      transcript,
+      transcriptText: text,
+      segments: transcript.length,
+      retrievedAt: new Date().toISOString(),
+      note: 'Check scientific terms and formulas for accuracy.'
+    });
+  } catch (error) {
+    console.error('Transcript request failed:', error.message);
+
+    return res.status(502).json({
+      error: 'Transcript service failed or timed out. Try again later.'
+    });
+  }
 });
 
 app.put('/api/cloud/backup', requireUser, async (req, res) => {
